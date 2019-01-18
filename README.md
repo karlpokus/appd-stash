@@ -15,9 +15,17 @@ Example config:
         "db_pwd": "xxx"
     },
     "data_sources": [
+         {
+            "unique_name": "perf",
+            "host": "http://AppDController1:8090/controller/rest/applications/myApplication1",
+            "metric_path": "Business Transaction Performance|Business Transaction Groups|SLA|*",
+            "marest_user": "rest@customer1",
+            "rest_pwd": "xxx"
+
+        },
         {
             "unique_name": "BT_test_env",
-            "host": "http://myAppDController:8090/controller/rest/applications/myApplication",
+            "host": "http://myAppDController2:8090/controller/rest/applications/myApplication2",
             "metric_path": "Business Transaction Performance|Business Transactions|*|*|*",
             "rest_user": "rest@customer1",
             "rest_pwd": "xxx"

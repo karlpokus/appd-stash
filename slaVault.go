@@ -120,10 +120,8 @@ func (md Metrics) isEmpty() bool {
 	if 0 == strings.Compare(md.MetricName, noData) {
 		bEmpty = true
 	} else if 0 == len(md.Values) {
-
 		bEmpty = true
 	}
-
 	return bEmpty
 }
 
@@ -138,17 +136,14 @@ func fixJSONFormat(toFix []byte) []byte {
 	return fix
 }
 
-//Build the URI from config and encode it
-func buildURI(minutes int, rolledUp bool) string {
-
-	var URI string
-	//	URLQueryEscaper(path)
-
-	return URI
-}
-
 // Get minute scorecard data from AppD Controller ( DataSource = ds)
 func getJSONData(ds int, minutes int, rolledUp bool) []byte {
+	// Ignore all temporal ds connection errors -> the show must go on!
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Printf("error is %v\n", err)
+		}
+	}()
 
 	// get config
 	c := getConfig()
@@ -169,13 +164,16 @@ func getJSONData(ds int, minutes int, rolledUp bool) []byte {
 	}
 	req.SetBasicAuth("rest@customer1", "mycase")
 
+	var bodyBytes []byte
+
+	// Don't panic!  Thread must run even if no contact with data source at the moment
+	// return empty response body on faulure
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		// handle err
+		return bodyBytes
 	}
 	defer resp.Body.Close()
 
-	var bodyBytes []byte
 	if resp.StatusCode == http.StatusOK {
 		bodyBytes, _ = ioutil.ReadAll(resp.Body)
 	}
@@ -202,7 +200,7 @@ func getSLA(ds int, minBeforeNow int, bRolledup bool) map[int64]SLA {
 		// Build map startTime|SLA-struct
 		if 0 == len(metrics.BTmetrics[bt].Values) {
 			//Series are empty - > do nothing
-			//	fmt.Println("Empty metrics series!")
+			continue
 		} else {
 			// Loop over all metric values and add values to map
 			for i := 0; i < len(metrics.BTmetrics); i++ {
@@ -252,9 +250,7 @@ func getSLA(ds int, minBeforeNow int, bRolledup bool) map[int64]SLA {
 					case 4:
 						sla.setVerySlow(v[j].Sum)
 					}
-
 					mSeries[v[j].StartTimeInMillis] = sla
-
 				}
 			}
 		}
@@ -288,8 +284,8 @@ func printSLA(series map[int64]SLA) {
 	for _, k := range sortedKeys {
 		s := series[int64(k)]
 		t := s.startTime / 1000 // millis to seconds
-		fmt.Printf("HIS_%v: %v, A = %3.1f, P = %3.1f\n", s.frequency, time.Unix(t, 0), s.availability, s.performance)
-		//fmt.Printf("HIS_%v: %v, A = %3.1f, P = %3.1f \n%+v\n", s.frequency, time.Unix(t, 0), s.availability, s.performance, s)
+		//fmt.Printf("HIS_%v: %v, A = %3.1f, P = %3.1f\n", s.frequency, time.Unix(t, 0), s.availability, s.performance)
+		fmt.Printf("HIS_%v: %v, A = %3.1f, P = %3.1f \n%+v\n", s.frequency, time.Unix(t, 0), s.availability, s.performance, s)
 	}
 
 	fmt.Printf("Series lenght = %v\n", len(sortedKeys))
@@ -297,6 +293,13 @@ func printSLA(series map[int64]SLA) {
 }
 
 func influxSaveData(ds int, series map[int64]SLA) {
+	// Ignore all temporal InfluxDB connection problems
+	// We have a 4 hour window to save minute data-> the show must go on!
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Printf("error is %v\n", err)
+		}
+	}()
 
 	// Don't try to save if series are empty
 	if 0 == len(series) {
@@ -370,7 +373,7 @@ func influx1mPump(ds int) func(int) string {
 		start := time.Now()
 
 		// get 5 min of SLA data
-		sla := getSLA(ds, 1, false)
+		sla := getSLA(ds, 5, false)
 		get := time.Since(start)
 
 		influxSaveData(ds, sla)
@@ -378,7 +381,7 @@ func influx1mPump(ds int) func(int) string {
 
 		printSLA(sla)
 
-		return fmt.Sprintf("influx1mPump() get:%v, save:%v", get, save-get)
+		return fmt.Sprintf("influx1mPump(%v) get:%v, save:%v", ds, get, save-get)
 	}
 }
 
@@ -399,7 +402,7 @@ func influx1hPump(ds int) func(int) string {
 
 		printSLA(sla)
 
-		t := fmt.Sprintf("influx1hPump() get:%v, save:%v", get, save-get)
+		t := fmt.Sprintf("influx1hPump(%v) get:%v, save:%v", ds, get, save-get)
 		fmt.Println(t)
 
 		// Wait an hour
@@ -449,15 +452,16 @@ Get:        *one minute* Business Transaction(BT) *scorecard* data from one or s
 Save:       one minute  *scorecard* into InfluxDB with possibility to calculate *SLA* -> calcSLA()
 (Graph:)    can easily graph *SLA* from saved *scorecard* with your favorite tool Grafana/Graphite etc.
 */
-
-// TODO: Error handling and throttling when data source is not available for some time < 4h
 func main() {
 	// Get configuration
 	c := getConfig()
 
 	// For all data sources -> save SLA data periodically into InfluxDB
+	// Thread the data pump for all datasources
 	for ds := 0; ds < len(c.DataSources); ds++ {
-		influxDataPump(ds)
+		go influxDataPump(ds)
 	}
 
+	// Wait indefinitely - should not exit even when lost connection to data source or db
+	select {}
 }
