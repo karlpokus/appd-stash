@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/client/v2"
+	//"github.com/influxdata/influxdb1-client/v2"
 )
 
 // DataSource Configuration
@@ -57,11 +58,13 @@ type SLA struct {
 func (s *SLA) CalcSLA() {
 
 	if 0 < s.totalCalls {
-		a := float64((s.totalErrors + s.totalStalls)) / float64(s.totalCalls)
-		p := float64(s.totalVerySlow) / float64(s.totalCalls)
+		// percent that affects availability
+		a := 100 * float64((s.totalErrors + s.totalStalls)) / float64(s.totalCalls)
+		// Percent that affects performande
+		p := 100 * (float64(s.totalVerySlow) / float64(s.totalCalls))
 
 		s.availability = float64(100) - a
-		s.performance = 100 + 100*p
+		s.performance = float64(100) + p
 	}
 
 }
@@ -139,9 +142,10 @@ func fixJSONFormat(toFix []byte) []byte {
 // Get minute scorecard data from AppD Controller ( DataSource = ds)
 func getJSONData(ds int, minutes int, rolledUp bool) []byte {
 	// Ignore all temporal ds connection errors -> the show must go on!
+	// Log the error
 	defer func() {
 		if err := recover(); err != nil {
-			fmt.Printf("error is %v\n", err)
+			log.Printf("getJSONdata ds=%v error = %v\n", ds, err)
 		}
 	}()
 
@@ -158,11 +162,9 @@ func getJSONData(ds int, minutes int, rolledUp bool) []byte {
 
 	//fmt.Println(url)
 
-	req, err := http.NewRequest("GET", url.String(), nil)
-	if err != nil {
-		// handle err
-	}
-	req.SetBasicAuth("rest@customer1", "mycase")
+	req, _ := http.NewRequest("GET", url.String(), nil)
+
+	req.SetBasicAuth(c.DataSources[ds].RestUser, c.DataSources[ds].RestPwd)
 
 	var bodyBytes []byte
 
@@ -295,9 +297,10 @@ func printSLA(series map[int64]SLA) {
 func influxSaveData(ds int, series map[int64]SLA) {
 	// Ignore all temporal InfluxDB connection problems
 	// We have a 4 hour window to save minute data-> the show must go on!
+	// Log the error
 	defer func() {
 		if err := recover(); err != nil {
-			fmt.Printf("error is %v\n", err)
+			log.Printf("influxSaveData ds=%v error = %v\n", ds, err)
 		}
 	}()
 
@@ -310,26 +313,19 @@ func influxSaveData(ds int, series map[int64]SLA) {
 	cnf := getConfig()
 
 	// Create a new HTTPClient
-	c, err := client.NewHTTPClient(client.HTTPConfig{
+	c, _ := client.NewHTTPClient(client.HTTPConfig{
 		Addr:     cnf.Database.Host,
 		Username: cnf.Database.DBUser,
 		Password: cnf.Database.DbPwd,
 	})
-	if err != nil {
-		log.Fatal(err)
-	}
 	defer c.Close()
 
 	// Create a new point batch
-	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
+	bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
 		Database: cnf.Database.DbName,
 	})
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	// Tags: Database name, environment name
-	// TODO: Need support for several data sources with different names
 	tags := map[string]string{cnf.Database.DbName: cnf.DataSources[ds].UniqueName}
 	for _, v := range series {
 		fields := map[string]interface{}{
@@ -342,24 +338,63 @@ func influxSaveData(ds int, series map[int64]SLA) {
 		}
 
 		t := v.startTime / 1000
-		pt, err := client.NewPoint(cnf.Database.DbName, tags, fields, time.Unix(t, 0))
+		pt, _ := client.NewPoint(cnf.Database.DbName, tags, fields, time.Unix(t, 0))
 
-		if err != nil {
-			log.Fatal(err)
-		}
 		bp.AddPoint(pt)
-
 	}
-
-	// Write the batch
-	if err := c.Write(bp); err != nil {
-		log.Fatal(err)
-	}
+	//  Write batch
+	c.Write(bp)
 
 	// Close client resources
-	if err := c.Close(); err != nil {
-		log.Fatal(err)
+	c.Close()
+}
+
+func influxSaveTimings(ds int, slen int, start time.Time, get time.Duration, save time.Duration) {
+	// Ignore all temporal InfluxDB connection problems
+	// We have a 4 hour window to save minute data-> the show must go on!
+	// Log the error
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("influxSaveTimings ds=%v error = %v\n", ds, err)
+		}
+	}()
+
+	// Get Configuration
+	cnf := getConfig()
+
+	// Create a new HTTPClient
+	c, _ := client.NewHTTPClient(client.HTTPConfig{
+		Addr:     cnf.Database.Host,
+		Username: cnf.Database.DBUser,
+		Password: cnf.Database.DbPwd,
+	})
+	defer c.Close()
+
+	// Create a new point batch
+	bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
+		Database: cnf.Database.DbName,
+	})
+
+	// Convert to number
+	msGet := int64(get / time.Millisecond)
+	msSave := int64(save / time.Millisecond)
+
+	// Tags: Database name, environment name
+	tags := map[string]string{cnf.Database.DbName: "timings"}
+	fields := map[string]interface{}{
+		"ds":   ds,
+		"slen": slen,
+		"get":  msGet,
+		"save": msSave,
 	}
+
+	pt, _ := client.NewPoint(cnf.Database.DbName, tags, fields, start)
+
+	bp.AddPoint(pt)
+	c.Write(bp)
+
+	// Close client resources
+	c.Close()
 }
 
 //Save SLA data each minute
@@ -379,7 +414,8 @@ func influx1mPump(ds int) func(int) string {
 		influxSaveData(ds, sla)
 		save := time.Since(start)
 
-		printSLA(sla)
+		//printSLA(sla)
+		influxSaveTimings(ds, len(sla), start, get, save-get)
 
 		return fmt.Sprintf("influx1mPump(%v) get:%v, save:%v", ds, get, save-get)
 	}
@@ -400,10 +436,12 @@ func influx1hPump(ds int) func(int) string {
 		influxSaveData(ds, sla)
 		save := time.Since(start)
 
-		printSLA(sla)
+		//printSLA(sla)
 
 		t := fmt.Sprintf("influx1hPump(%v) get:%v, save:%v", ds, get, save-get)
-		fmt.Println(t)
+
+		//fmt.Println(t)
+		influxSaveTimings(ds, len(sla), start, get, save-get)
 
 		// Wait an hour
 		time.Sleep(time.Duration(thinkTime) * time.Millisecond)
@@ -434,8 +472,8 @@ func influxDataPump(ds int) {
 
 	pump := func(dataFunc func(ds int) string) string {
 		for {
-			n := dataFunc(ds)
-			fmt.Printf("%v %v\n", n, time.Now())
+			dataFunc(ds)
+			//fmt.Printf("%v %v\n", n, time.Now())
 		}
 	}
 
