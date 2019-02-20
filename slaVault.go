@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"context"
 
 	"github.com/influxdata/influxdb/client/v2"
 	//"github.com/influxdata/influxdb1-client/v2"
@@ -41,6 +42,8 @@ const calls = "Calls per Minute"
 const errors = "Errors per Minute"
 const stalls = "Stall Count"
 const veryslow = "Number of Very Slow Calls"
+
+const requestTimeout = "3s"
 
 // SLA object with methods
 type SLA struct {
@@ -141,13 +144,12 @@ func fixJSONFormat(toFix []byte) []byte {
 
 // Get minute scorecard data from AppD Controller ( DataSource = ds)
 func getJSONData(ds int, minutes int, rolledUp bool) []byte {
-	// Ignore all temporal ds connection errors -> the show must go on!
-	// Log the error
+	/* Ignore all temporal ds connection errors -> the show must go on! Log the error
 	defer func() {
 		if err := recover(); err != nil {
 			log.Printf("getJSONdata ds=%v error = %v\n", ds, err)
 		}
-	}()
+	}()*/
 
 	// get config
 	c := getConfig()
@@ -162,7 +164,11 @@ func getJSONData(ds int, minutes int, rolledUp bool) []byte {
 
 	//fmt.Println(url)
 
+	// create request with timeout
 	req, _ := http.NewRequest("GET", url.String(), nil)
+	ttl, _ := time.ParseDuration(requestTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), ttl)
+	defer cancel()
 
 	req.SetBasicAuth(c.DataSources[ds].RestUser, c.DataSources[ds].RestPwd)
 
@@ -170,11 +176,12 @@ func getJSONData(ds int, minutes int, rolledUp bool) []byte {
 
 	// Don't panic!  Thread must run even if no contact with data source at the moment
 	// return empty response body on faulure
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	defer resp.Body.Close()
+
 	if err != nil {
 		return bodyBytes
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
 		bodyBytes, _ = ioutil.ReadAll(resp.Body)
